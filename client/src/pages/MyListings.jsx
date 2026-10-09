@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../context/AuthContext';
+import Rating from '../components/Rating';
+import { formatDeposit } from '../format';
 
 export default function MyListings() {
   const [listings, setListings] = useState([]);
@@ -9,19 +11,21 @@ export default function MyListings() {
   const [loading, setLoading] = useState(true);
   const { token } = useAuth();
 
-  function load() {
-    setLoading(true);
-    api
+  const load = useCallback(() => {
+    return api
       .getMyListings(token)
       .then(setListings)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }
+  }, [token]);
 
-  useEffect(load, [token]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   async function handleDelete(id) {
-    if (!confirm('Delete this listing?')) return;
+    if (!window.confirm('Delete this listing?')) return;
+    setError('');
     try {
       await api.deleteListing(id, token);
       load();
@@ -32,6 +36,7 @@ export default function MyListings() {
 
   async function toggleAvailability(listing) {
     const next = listing.availability === 'available' ? 'unavailable' : 'available';
+    setError('');
     try {
       await api.updateListing(listing.id, { availability: next }, token);
       load();
@@ -58,27 +63,38 @@ export default function MyListings() {
       )}
 
       <div className="manage-list">
-        {listings.map((listing) => (
-          <div className="manage-row" key={listing.id}>
-            <div>
-              <span className={`tag tag-${listing.type}`}>{listing.type}</span>
-              <Link to={`/listings/${listing.id}`} className="manage-title">
-                {listing.title}
-              </Link>
-              <span className={`status status-${listing.availability}`}>
-                {listing.availability}
-              </span>
+        {listings.map((listing) => {
+          const deposit = listing.type === 'tool' ? formatDeposit(listing.deposit_amount) : null;
+          return (
+            <div className="manage-row" key={listing.id}>
+              <div>
+                <span className={`tag tag-${listing.type}`}>{listing.type}</span>
+                <Link to={`/listings/${listing.id}`} className="manage-title">
+                  {listing.title}
+                </Link>
+                <span className={`status status-${listing.availability}`}>
+                  {listing.availability}
+                </span>
+                <p className="manage-meta">
+                  <Rating avg={listing.avg_rating} count={listing.review_count} />
+                  {listing.area && ` · ${listing.area}`}
+                  {deposit && ` · Deposit ${deposit}`}
+                </p>
+              </div>
+              <div className="manage-actions">
+                <Link to={`/listings/${listing.id}/edit`} className="btn btn-ghost">
+                  Edit
+                </Link>
+                <button className="btn btn-ghost" onClick={() => toggleAvailability(listing)}>
+                  Mark {listing.availability === 'available' ? 'unavailable' : 'available'}
+                </button>
+                <button className="btn btn-danger" onClick={() => handleDelete(listing.id)}>
+                  Delete
+                </button>
+              </div>
             </div>
-            <div className="manage-actions">
-              <button className="btn btn-ghost" onClick={() => toggleAvailability(listing)}>
-                Mark {listing.availability === 'available' ? 'unavailable' : 'available'}
-              </button>
-              <button className="btn btn-danger" onClick={() => handleDelete(listing.id)}>
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

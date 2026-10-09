@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../context/AuthContext';
@@ -8,8 +8,13 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [notice] = useState(() => sessionStorage.getItem('authNotice'));
   const { login } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    sessionStorage.removeItem('authNotice');
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -30,6 +35,7 @@ export default function Login() {
     <div className="page page-narrow">
       <h1>Log in</h1>
       <form className="form-card" onSubmit={handleSubmit}>
+        {notice && <p className="notice">{notice}</p>}
         {error && <p className="error-text">{error}</p>}
         <label>
           Email

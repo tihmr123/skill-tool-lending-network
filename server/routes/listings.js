@@ -4,12 +4,25 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Browse / search listings (public). Query params: q, type, category
+const RATING_COLUMNS = `
+  (SELECT ROUND(AVG(rating), 1) FROM reviews WHERE reviews.listing_id = listings.id) AS avg_rating,
+  (SELECT COUNT(*) FROM reviews WHERE reviews.listing_id = listings.id) AS review_count
+`;
+
+// Returns a non-negative integer, 0 for empty input, or null if invalid
+function cleanDeposit(value) {
+  if (value === undefined || value === null || value === '') return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
+// Browse / search listings (public). Query params: q, type, category, area
 router.get('/', (req, res) => {
-  const { q, type, category } = req.query;
+  const { q, type, category, area } = req.query;
 
   let sql = `
-    SELECT listings.*, users.name AS owner_name
+    SELECT listings.*, users.name AS owner_name, ${RATING_COLUMNS}
     FROM listings
     JOIN users ON users.id = listings.owner_id
     WHERE 1 = 1
@@ -25,8 +38,12 @@ router.get('/', (req, res) => {
     params.push(type);
   }
   if (category) {
-    sql += ' AND listings.category = ?';
+    sql += ' AND LOWER(listings.category) = LOWER(?)';
     params.push(category);
+  }
+  if (area) {
+    sql += ' AND LOWER(listings.area) = LOWER(?)';
+    params.push(area);
   }
 
   sql += ' ORDER BY listings.created_at DESC';
@@ -35,10 +52,38 @@ router.get('/', (req, res) => {
   res.json(rows);
 });
 
-// Get listings owned by the current user (must come before /:id)
+// Distinct categories and areas, used to fill the filter dropdowns
+router.get('/meta/filters', (req, res) => {
+  const categories = db
+    .prepare(
+      `SELECT DISTINCT category FROM listings
+       WHERE category IS NOT NULL AND category != ''
+       ORDER BY category COLLATE NOCASE`
+    )
+    .all()
+    .map((r) => r.category);
+
+  const areas = db
+    .prepare(
+      `SELECT DISTINCT area FROM listings
+       WHERE area IS NOT NULL AND area != ''
+       ORDER BY area COLLATE NOCASE`
+    )
+    .all()
+    .map((r) => r.area);
+
+  res.json({ categories, areas });
+});
+
+// Listings owned by the current user
 router.get('/mine/list', requireAuth, (req, res) => {
   const rows = db
-    .prepare('SELECT * FROM listings WHERE owner_id = ? ORDER BY created_at DESC')
+    .prepare(
+      `SELECT listings.*, ${RATING_COLUMNS}
+       FROM listings
+       WHERE owner_id = ?
+       ORDER BY created_at DESC`
+    )
     .all(req.user.id);
   res.json(rows);
 });
@@ -47,8 +92,9 @@ router.get('/mine/list', requireAuth, (req, res) => {
 router.get('/:id', (req, res) => {
   const row = db
     .prepare(
-      `SELECT listings.*, users.name AS owner_name
-       FROM listings JOIN users ON users.id = listings.owner_id
+      `SELECT listings.*, users.name AS owner_name, ${RATING_COLUMNS}
+       FROM listings
+       JOIN users ON users.id = listings.owner_id
        WHERE listings.id = ?`
     )
     .get(req.params.id);
@@ -59,7 +105,11 @@ router.get('/:id', (req, res) => {
 
 // Create a listing (auth required)
 router.post('/', requireAuth, (req, res) => {
-  const { type, title, description, category } = req.body;
+  const { type, deposit_amount } = req.body;
+  const title = String(req.body.title || '').trim();
+  const description = String(req.body.description || '').trim();
+  const category = String(req.body.category || '').trim();
+  const area = String(req.body.area || '').trim();
 
   if (!type || !title) {
     return res.status(400).json({ error: 'Type and title are required' });
@@ -67,18 +117,31 @@ router.post('/', requireAuth, (req, res) => {
   if (!['skill', 'tool'].includes(type)) {
     return res.status(400).json({ error: "Type must be 'skill' or 'tool'" });
   }
+  if (title.length > 100) return res.status(400).json({ error: 'Title is too long (max 100)' });
+  if (description.length > 1000) {
+    return res.status(400).json({ error: 'Description is too long (max 1000)' });
+  }
+  if (category.length > 50) return res.status(400).json({ error: 'Category is too long (max 50)' });
+  if (area.length > 60) return res.status(400).json({ error: 'Area is too long (max 60)' });
+
+  let deposit = cleanDeposit(deposit_amount);
+  if (deposit === null) {
+    return res.status(400).json({ error: 'Deposit must be a whole number, 0 or more' });
+  }
+  if (type === 'skill') deposit = 0; // deposits only apply to physical tools
 
   const info = db
     .prepare(
-      'INSERT INTO listings (owner_id, type, title, description, category) VALUES (?, ?, ?, ?, ?)'
+      `INSERT INTO listings (owner_id, type, title, description, category, area, deposit_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(req.user.id, type, title, description || '', category || '');
+    .run(req.user.id, type, title, description, category, area, deposit);
 
   const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(listing);
 });
 
-// Update a listing (owner only)
+// Update a listing (owner only). Only fields that are sent are changed.
 router.put('/:id', requireAuth, (req, res) => {
   const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(req.params.id);
   if (!listing) return res.status(404).json({ error: 'Listing not found' });
@@ -86,17 +149,53 @@ router.put('/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Only the owner can edit this listing' });
   }
 
-  const { title, description, category, availability } = req.body;
-  db.prepare(
-    `UPDATE listings SET
-      title = COALESCE(?, title),
-      description = COALESCE(?, description),
-      category = COALESCE(?, category),
-      availability = COALESCE(?, availability)
-     WHERE id = ?`
-  ).run(title, description, category, availability, req.params.id);
+  const body = req.body;
+  const title = body.title !== undefined ? String(body.title).trim() : listing.title;
+  const description =
+    body.description !== undefined ? String(body.description).trim() : listing.description;
+  const category = body.category !== undefined ? String(body.category).trim() : listing.category;
+  const area = body.area !== undefined ? String(body.area).trim() : listing.area;
+  const availability = body.availability !== undefined ? body.availability : listing.availability;
 
-  const updated = db.prepare('SELECT * FROM listings WHERE id = ?').get(req.params.id);
+  if (!title) return res.status(400).json({ error: 'Title is required' });
+  if (title.length > 100) return res.status(400).json({ error: 'Title is too long (max 100)' });
+  if (description.length > 1000) {
+    return res.status(400).json({ error: 'Description is too long (max 1000)' });
+  }
+  if (category.length > 50) return res.status(400).json({ error: 'Category is too long (max 50)' });
+  if (area.length > 60) return res.status(400).json({ error: 'Area is too long (max 60)' });
+  if (!['available', 'unavailable'].includes(availability)) {
+    return res.status(400).json({ error: "Availability must be 'available' or 'unavailable'" });
+  }
+
+  let deposit = listing.deposit_amount;
+  if (body.deposit_amount !== undefined) {
+    deposit = cleanDeposit(body.deposit_amount);
+    if (deposit === null) {
+      return res.status(400).json({ error: 'Deposit must be a whole number, 0 or more' });
+    }
+  }
+  if (listing.type === 'skill') deposit = 0;
+
+  // A tool that is currently lent out can't be marked available by hand
+  if (listing.type === 'tool' && availability === 'available') {
+    const active = db
+      .prepare("SELECT id FROM borrow_requests WHERE listing_id = ? AND status = 'accepted'")
+      .get(listing.id);
+    if (active) {
+      return res
+        .status(400)
+        .json({ error: 'This tool is currently lent out. Mark the request as returned first.' });
+    }
+  }
+
+  db.prepare(
+    `UPDATE listings
+     SET title = ?, description = ?, category = ?, area = ?, deposit_amount = ?, availability = ?
+     WHERE id = ?`
+  ).run(title, description, category, area, deposit, availability, listing.id);
+
+  const updated = db.prepare('SELECT * FROM listings WHERE id = ?').get(listing.id);
   res.json(updated);
 });
 
@@ -108,7 +207,16 @@ router.delete('/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Only the owner can delete this listing' });
   }
 
-  db.prepare('DELETE FROM listings WHERE id = ?').run(req.params.id);
+  const active = db
+    .prepare("SELECT id FROM borrow_requests WHERE listing_id = ? AND status = 'accepted'")
+    .get(listing.id);
+  if (active) {
+    return res
+      .status(400)
+      .json({ error: 'This listing has an accepted request in progress. Finish it before deleting.' });
+  }
+
+  db.prepare('DELETE FROM listings WHERE id = ?').run(listing.id);
   res.json({ success: true });
 });
 

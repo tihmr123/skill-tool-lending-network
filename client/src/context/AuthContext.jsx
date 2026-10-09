@@ -1,4 +1,5 @@
-import { createContext, useContext, useState } from 'react';
+import { createContext, useContext, useEffect, useState } from 'react';
+import { setUnauthorizedHandler } from '../api';
 
 const AuthContext = createContext(null);
 
@@ -8,6 +9,18 @@ export function AuthProvider({ children }) {
     const stored = localStorage.getItem('user');
     return stored ? JSON.parse(stored) : null;
   });
+
+  // If the server rejects our token, clear the login. ProtectedRoute then sends
+  // the user to the login page, which shows the notice below.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      sessionStorage.setItem('authNotice', 'Your session expired. Please log in again.');
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      setToken(null);
+      setUser(null);
+    });
+  }, []);
 
   function login(token, user) {
     localStorage.setItem('token', token);

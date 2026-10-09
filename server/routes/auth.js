@@ -6,14 +6,28 @@ const { JWT_SECRET } = require('../middleware/auth');
 
 const router = express.Router();
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 router.post('/register', (req, res) => {
-  const { name, email, password } = req.body;
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'Name, email, and password are required' });
   }
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  if (name.length > 60) {
+    return res.status(400).json({ error: 'Name is too long (max 60)' });
+  }
+  if (!EMAIL_RE.test(email) || email.length > 254) {
+    return res.status(400).json({ error: 'Please enter a valid email address' });
+  }
+  if (password.length < 8 || password.length > 72) {
+    return res.status(400).json({ error: 'Password must be 8 to 72 characters' });
+  }
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return res.status(400).json({ error: 'Password must contain at least one letter and one number' });
   }
 
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
@@ -26,14 +40,16 @@ router.post('/register', (req, res) => {
     .prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)')
     .run(name, email, password_hash);
 
-  const user = { id: info.lastInsertRowid, name, email };
+  const user = { id: Number(info.lastInsertRowid), name, email };
   const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
 
   res.status(201).json({ token, user });
 });
 
 router.post('/login', (req, res) => {
-  const { email, password } = req.body;
+  const body = req.body || {};
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
 
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
